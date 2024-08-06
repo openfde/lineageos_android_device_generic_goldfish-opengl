@@ -51,7 +51,14 @@
 #define OP_rcSetColorBufferVulkanMode 					10045
 #define OP_rcReadColorBufferYUV 					10046
 #define OP_rcIsSyncSignaled 					10047
-#define OP_last 					10048
+
+//************ add opcode start ********************
+//for sync  PostVirtualDisplay
+#define OP_rcPostVirtualDisplay 					18888
+#define OP_rcPpostAllVirtualDisplaysDone 					18889
+//************ add opcode end ********************
+
+#define OP_last 					18890
 
 
 #endif

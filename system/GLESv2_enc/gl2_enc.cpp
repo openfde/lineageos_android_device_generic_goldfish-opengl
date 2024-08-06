@@ -2241,8 +2241,12 @@ void glGetShaderPrecisionFormat_enc(void *self , GLenum shadertype, GLenum preci
 
 		memcpy(ptr, &shadertype, 4); ptr += 4;
 		memcpy(ptr, &precisiontype, 4); ptr += 4;
-	*(unsigned int *)(ptr) = __size_range; ptr += 4;
-	*(unsigned int *)(ptr) = __size_precision; ptr += 4;
+
+	memcpy(ptr, &__size_range, 4); ptr += 4;	
+	memcpy(ptr, &__size_precision, 4); ptr += 4;
+	//*(unsigned int *)(ptr) = __size_range; ptr += 4;
+	//*(unsigned int *)(ptr) = __size_precision; ptr += 4;
+
 
 	if (useChecksum) checksumCalculator->addBuffer(buf, ptr-buf);
 	if (useChecksum) checksumCalculator->writeChecksum(ptr, checksumSize); ptr += checksumSize;

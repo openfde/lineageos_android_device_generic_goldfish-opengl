@@ -23,6 +23,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <qemu_pipe_bp.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 namespace {
 int open_verbose(const char* name, int flags) {
@@ -43,12 +45,11 @@ int qemu_pipe_open_ns(const char* ns, const char* pipeName, int flags) {
         errno = EINVAL;
         return -1;
     }
-
-    const int fd = open_verbose("/dev/goldfish_pipe", flags);
-    if (fd < 0) {
-        return fd;
+    if (strstr(pipeName,"opengles") == NULL) {
+        errno = EINVAL;
+        return -1;
     }
-
+    
     char buf[256];
     int bufLen;
     if (ns) {
@@ -56,6 +57,57 @@ int qemu_pipe_open_ns(const char* ns, const char* pipeName, int flags) {
     } else {
         bufLen = snprintf(buf, sizeof(buf), "pipe:%s", pipeName);
     }
+
+
+    /*
+    const int fd = open_verbose("/dev/goldfish_pipe", flags);
+    if (fd < 0) {
+        return fd;
+    }*/
+
+
+    #if 0
+    fd = open("/dev/qemu_pipe", O_RDWR);
+    #else
+
+    int fd = socket(AF_LOCAL, SOCK_STREAM, 0);
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/sockets/qemu_pipe", sizeof(addr.sun_path));  
+
+    if (connect(fd, (struct sockaddr*) &addr, sizeof(addr)) < 0) {
+        ALOGE("###### Failed to connect to pipe:%s %d, %s ######", pipeName, errno, strerror(errno));
+    #if !defined(QEMU_PIPE_FROM_ADB)
+        close(fd);
+    #else
+        // Adb renames 'close' to 'unix_close' and marks the original
+        // 'close' as not available.
+        unix_close(fd);
+    #endif
+        fd = -1;
+    }
+    #endif
+
+    if (fd < 0 && errno == ENOENT)
+        fd = open("/dev/goldfish_pipe", O_RDWR);
+    if (fd < 0) {
+        ALOGD("%s: Could not open /dev/qemu_pipe: %s", __FUNCTION__, strerror(errno));
+        //errno = ENOSYS;
+        return -1;
+    }
+
+    //buffLen = strlen(buff);
+
+
+    /*char buf[256];
+    int bufLen;
+    if (ns) {
+        bufLen = snprintf(buf, sizeof(buf), "pipe:%s:%s", ns, pipeName);
+    } else {
+        bufLen = snprintf(buf, sizeof(buf), "pipe:%s", pipeName);
+    }*/
 
     if (qemu_pipe_write_fully(fd, buf, bufLen + 1)) {
         ALOGE("%s:%d: Could not connect to the '%s' service: %s",

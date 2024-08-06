@@ -4398,7 +4398,12 @@ void GL2Encoder::s_glGetProgramBinary(void* self, GLuint program, GLsizei bufSiz
 
 void GL2Encoder::s_glReadPixels(void* self, GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid* pixels) {
     GL2Encoder *ctx = (GL2Encoder *)self;
-
+    if (!GLESv2Validation::readPixelsFormat(format)) {
+        ALOGE("Invalidate format 0x%X", format);
+    }
+    if (!GLESv2Validation::readPixelsType(type)) {
+        ALOGE("Invalidate type 0x%X", type);
+    }
     SET_ERROR_IF(!GLESv2Validation::readPixelsFormat(format), GL_INVALID_ENUM);
     SET_ERROR_IF(!GLESv2Validation::readPixelsType(type), GL_INVALID_ENUM);
     SET_ERROR_IF(width < 0 || height < 0, GL_INVALID_VALUE);

@@ -14,6 +14,8 @@
 * limitations under the License.
 */
 
+#include <pthread.h>
+
 #include <assert.h>
 #include "HostConnection.h"
 #include "ThreadInfo.h"
@@ -66,6 +68,9 @@
 #else
 #define DPRINT(...)
 #endif
+
+static pthread_mutex_t ctxLock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+static std::set<uint32_t> livingContexts;
 
 template<typename T>
 static T setErrorFunc(GLint error, T returnValue) {
@@ -849,6 +854,9 @@ static const char *getGLString(int glEnum)
     //
     // keep the string in the context and return its value
     //
+    if (*strPtr) {
+        delete [] *strPtr;
+    }
     *strPtr = hostStr;
     return hostStr;
 }
@@ -1311,13 +1319,34 @@ EGLBoolean eglWaitClient()
 
 // We may need to trigger this directly from the TLS destructor.
 static EGLBoolean s_eglReleaseThreadImpl(EGLThreadInfo* tInfo) {
+    bool shutdown = true;
     if (!tInfo) return EGL_TRUE;
 
     tInfo->eglError = EGL_SUCCESS;
     EGLContext_t* context = tInfo->currentContext;
 
+    std::set<uint32_t>::iterator tIter = tInfo->everCreatedContexts.begin();
+    {
+        pthread_mutex_lock(&ctxLock);
+        while (tIter != tInfo->everCreatedContexts.end()) {
+            if (livingContexts.find(*tIter) != livingContexts.end()) {
+                // context is still living
+                //ALOGD("%s(%d), no need shutdown",__FUNCTION__, __LINE__);
+                shutdown = false;
+                tIter++;
+            } else {
+                tIter = tInfo->everCreatedContexts.erase(tIter);
+            }
+        }
+        pthread_mutex_unlock(&ctxLock);
+    }
+
+    if (!shutdown) {
+        return EGL_TRUE;
+    }
+
     if (!context || !s_display.isContext(context)) {
-        HostConnection::exit();
+        HostConnection::exit(shutdown);
         return EGL_TRUE;
     }
 
@@ -1334,6 +1363,12 @@ static EGLBoolean s_eglReleaseThreadImpl(EGLThreadInfo* tInfo) {
 
     if (context->deletePending) {
         if (context->rcContext) {
+            pthread_mutex_lock(&ctxLock);
+            std::set<uint32_t>::iterator it = livingContexts.find(context->rcContext);
+            if (it != livingContexts.end()) {
+                livingContexts.erase(it);
+            }
+            pthread_mutex_unlock(&ctxLock);
             rcEnc->rcDestroyContext(rcEnc, context->rcContext);
             context->rcContext = 0;
         }
@@ -1341,7 +1376,7 @@ static EGLBoolean s_eglReleaseThreadImpl(EGLThreadInfo* tInfo) {
     }
     tInfo->currentContext = 0;
 
-    HostConnection::exit();
+    HostConnection::exit(shutdown);
 
     return EGL_TRUE;
 }
@@ -1630,6 +1665,17 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config, EGLContext share_c
     }
 
     context->rcContext = rcContext;
+
+    if (context->rcContext) {
+        pthread_mutex_lock(&ctxLock);
+        livingContexts.insert(context->rcContext);
+        EGLThreadInfo *tInfo = getEGLThreadInfo();
+        if (tInfo) {
+            tInfo->everCreatedContexts.insert(context->rcContext);
+        }
+        pthread_mutex_unlock(&ctxLock);
+    }
+
     return context;
 }
 
@@ -1646,6 +1692,13 @@ EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx)
     }
 
     if (context->rcContext) {
+        pthread_mutex_lock(&ctxLock);
+        std::set<uint32_t>::iterator it = livingContexts.find(context->rcContext);
+        if (it != livingContexts.end()) {
+            livingContexts.erase(it);
+        }
+        pthread_mutex_unlock(&ctxLock);
+        
         DEFINE_AND_VALIDATE_HOST_CONNECTION(EGL_FALSE);
         rcEnc->rcDestroyContext(rcEnc, context->rcContext);
         context->rcContext = 0;
@@ -1731,9 +1784,9 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLC
             context->getClientState();
 
         if (!hostCon->gl2Encoder()->isInitialized()) {
-            ALOGD("%s: %p: ver %d %d (tinfo %p) (first time)",
-                  __FUNCTION__,
-                  context, context->majorVersion, context->minorVersion, tInfo);
+            //ALOGD("%s: %p: ver %d %d (tinfo %p) (first time)",
+            //      __FUNCTION__,
+            //      context, context->majorVersion, context->minorVersion, tInfo);
             s_display.gles2_iface()->init();
             hostCon->gl2Encoder()->setInitialized();
             ClientAPIExts::initClientFuncs(s_display.gles2_iface(), 1);
@@ -1837,9 +1890,9 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLC
         }
         else {
             if (!hostCon->glEncoder()->isInitialized()) {
-                ALOGD("%s: %p: ver %d %d (tinfo %p) (first time)",
-                      __FUNCTION__,
-                      context, context->majorVersion, context->minorVersion, tInfo);
+                //ALOGD("%s: %p: ver %d %d (tinfo %p) (first time)",
+                //      __FUNCTION__,
+                //      context, context->majorVersion, context->minorVersion, tInfo);
                 s_display.gles_iface()->init();
                 hostCon->glEncoder()->setInitialized();
                 ClientAPIExts::initClientFuncs(s_display.gles_iface(), 0);

@@ -537,13 +537,13 @@ HostConnection *HostConnection::getWithThreadInfo(EGLThreadInfo* tinfo) {
     return tinfo->hostConn;
 }
 
-void HostConnection::exit() {
+void HostConnection::exit(bool shutdown) {
     EGLThreadInfo *tinfo = getEGLThreadInfo();
     if (!tinfo) {
         return;
     }
 
-    if (tinfo->hostConn) {
+    if (tinfo->hostConn && shutdown) {
         delete tinfo->hostConn;
         tinfo->hostConn = NULL;
     }
