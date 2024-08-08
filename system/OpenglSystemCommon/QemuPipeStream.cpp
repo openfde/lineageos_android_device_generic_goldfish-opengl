@@ -83,14 +83,21 @@ void *QemuPipeStream::allocBuffer(size_t minSize)
         m_buf = (unsigned char *)malloc(allocSize);
     }
     else if (m_bufsize < allocSize) {
-        unsigned char *p = (unsigned char *)realloc(m_buf, allocSize);
+        if (m_buf) {
+            free(m_buf);
+            m_buf = NULL;
+        }
+        unsigned char *p = (unsigned char *)malloc(allocSize);
+        //unsigned char *p = (unsigned char *)realloc(m_buf, allocSize);
         if (p != NULL) {
             m_buf = p;
             m_bufsize = allocSize;
         } else {
             ERR("realloc (%zu) failed\n", allocSize);
-            free(m_buf);
-            m_buf = NULL;
+            if (m_buf) {
+                free(m_buf);
+                m_buf = NULL;
+            }
             m_bufsize = 0;
         }
     }

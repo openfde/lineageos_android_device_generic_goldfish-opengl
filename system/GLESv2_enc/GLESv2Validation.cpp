@@ -223,6 +223,8 @@ bool framebufferAttachment(GL2Encoder* ctx, GLenum attachment) {
     return false;
 }
 
+#define GL_BGR                            0x80E0
+#define GL_BGRA                           0x80E1
 bool readPixelsFormat(GLenum format) {
     switch (format) {
     case GL_RED:
@@ -236,6 +238,8 @@ bool readPixelsFormat(GLenum format) {
     case GL_LUMINANCE_ALPHA:
     case GL_LUMINANCE:
     case GL_ALPHA:
+    case GL_BGR:
+    case GL_BGRA:
         return true;
     }
     return false;

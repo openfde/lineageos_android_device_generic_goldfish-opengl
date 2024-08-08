@@ -19,6 +19,7 @@
 #include "HostConnection.h"
 
 #include <inttypes.h>
+#include <set>
 
 struct EGLContext_t;
 
@@ -29,6 +30,7 @@ struct EGLThreadInfo
     EGLContext_t *currentContext;
     HostConnection *hostConn;
     int           eglError;
+    std::set<uint32_t> everCreatedContexts;
 };
 
 typedef bool (*tlsDtorCallback)(void*);

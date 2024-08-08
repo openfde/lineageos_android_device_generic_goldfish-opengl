@@ -137,7 +137,7 @@ class HostConnection
 public:
     static HostConnection *get();
     static HostConnection *getWithThreadInfo(EGLThreadInfo* tInfo);
-    static void exit();
+    static void exit(bool shutdown);
 
     static HostConnection *createUnique();
     static void teardownUnique(HostConnection* con);
