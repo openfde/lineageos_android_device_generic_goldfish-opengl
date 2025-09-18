@@ -14,7 +14,6 @@
 * limitations under the License.
 */
 #include "ThreadInfo.h"
-#include "cutils/threads.h"
 
 #ifdef __BIONIC__
 #include <bionic/tls.h>
@@ -28,6 +27,60 @@
 #endif
 
 #include <pthread.h>
+
+#include  <sys/types.h>
+//#include <pthread.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+extern pid_t gettid();
+
+typedef struct {
+    pthread_mutex_t   lock;
+    int               has_tls;
+    pthread_key_t     tls;
+} thread_store_t;
+
+#define  THREAD_STORE_INITIALIZER  { PTHREAD_MUTEX_INITIALIZER, 0, 0 }
+
+typedef void  (*thread_store_destruct_t)(void*  value);
+
+extern void*  thread_store_get(thread_store_t*  store);
+
+extern void   thread_store_set(thread_store_t*          store,
+                               void*                    value,
+                               thread_store_destruct_t  destroy);
+
+#ifdef __cplusplus
+}
+#endif
+
+void*  thread_store_get( thread_store_t*  store )
+{
+    if (!store->has_tls)
+        return NULL;
+
+    return pthread_getspecific( store->tls );
+}
+
+extern void   thread_store_set( thread_store_t*          store,
+                                void*                    value,
+                                thread_store_destruct_t  destroy)
+{
+    pthread_mutex_lock( &store->lock );
+    if (!store->has_tls) {
+        if (pthread_key_create( &store->tls, destroy) != 0) {
+            pthread_mutex_unlock(&store->lock);
+            return;
+        }
+        store->has_tls = 1;
+    }
+    pthread_mutex_unlock( &store->lock );
+
+    pthread_setspecific( store->tls, value );
+}
 
 thread_store_t s_tls = THREAD_STORE_INITIALIZER;
 
