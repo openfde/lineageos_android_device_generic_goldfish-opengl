@@ -23,10 +23,6 @@
 #include "FormatConversions.h"
 #include "debug.h"
 
-#include "aemu/base/Tracing.h"
-
-#define ATRACE_TAG ATRACE_TAG_GRAPHICS
-
 const int kOMX_COLOR_FormatYUV420Planar = 19;
 
 using ::android::hardware::hidl_handle;
@@ -80,20 +76,6 @@ int waitHidlFence(const hidl_handle& hidlHandle, const char* logname) {
     return waitFenceFd(nativeHandle->data[0], logname);
 }
 
-bool needGpuBuffer(const uint32_t usage) {
-    return usage & (BufferUsage::GPU_TEXTURE
-                    | BufferUsage::GPU_RENDER_TARGET
-                    | BufferUsage::COMPOSER_OVERLAY
-                    | BufferUsage::COMPOSER_CLIENT_TARGET
-                    | BufferUsage::GPU_DATA_BUFFER);
-}
-
-constexpr uint64_t one64 = 1;
-
-constexpr uint64_t ones(int from, int to) {
-    return ((one64 << (to - from + 1)) - 1) << from;
-}
-
 class GoldfishMapper : public IMapper3 {
 public:
     GoldfishMapper() : m_hostConn(HostConnection::createUnique()) {
@@ -129,6 +111,12 @@ public:
         cb_handle_30_t* cb = cb_handle_30_t::from(raw);
         if (!cb) {
             RETURN_ERROR(Error3::BAD_BUFFER);
+        }
+
+        if (cb->hostHandle) {
+            const HostConnectionSession conn = getHostConnectionSession();
+            ExtendedRCEncoderContext *const rcEnc = conn.getRcEncoder();
+            rcEnc->rcCloseColorBuffer(rcEnc, cb->hostHandle);
         }
 
         if (cb->mmapedSize > 0) {
@@ -236,12 +224,11 @@ private:  // **** impl ****
         }
 
         if (cb->mmapedSize > 0) {
-            LOG_ALWAYS_FATAL_IF(cb->bufferFdIndex < 0);
             void* ptr;
             const int res = GoldfishAddressSpaceBlock::memoryMap(
                 cb->getBufferPtr(),
                 cb->mmapedSize,
-                cb->fds[cb->bufferFdIndex],
+                cb->bufferFd,
                 cb->getMmapedOffset(),
                 &ptr);
             if (res) {
@@ -252,28 +239,18 @@ private:  // **** impl ****
             cb->setBufferPtr(ptr);
         }
 
+        if (cb->hostHandle) {
+            const HostConnectionSession conn = getHostConnectionSession();
+            ExtendedRCEncoderContext *const rcEnc = conn.getRcEncoder();
+            rcEnc->rcOpenColorBuffer2(rcEnc, cb->hostHandle);
+        }
+
         *phandle = imported;
         RETURN(Error3::NONE);
     }
 
-    void setLocked(cb_handle_30_t* cb, const uint8_t checkedUsage,
-                   const Rect& accessRegion) {
-        if (checkedUsage & BufferUsage::CPU_WRITE_MASK) {
-            cb->lockedLeft = accessRegion.left;
-            cb->lockedTop = accessRegion.top;
-            cb->lockedWidth = accessRegion.width;
-            cb->lockedHeight = accessRegion.height;
-        } else {
-            cb->lockedLeft = 0;
-            cb->lockedTop = 0;
-            cb->lockedWidth = cb->width;
-            cb->lockedHeight = cb->height;
-        }
-        cb->lockedUsage = checkedUsage;
-    }
-
     Error3 lockImpl(void* raw,
-                    const uint64_t uncheckedUsage,
+                    uint64_t cpuUsage,
                     const Rect& accessRegion,
                     const hidl_handle& acquireFence,
                     void** pptr,
@@ -285,14 +262,6 @@ private:  // **** impl ****
         cb_handle_30_t* cb = cb_handle_30_t::from(raw);
         if (!cb) {
             RETURN_ERROR(Error3::BAD_BUFFER);
-        }
-        if (cb->lockedUsage) {
-            RETURN_ERROR(Error3::BAD_VALUE);
-        }
-        const uint8_t checkedUsage = uncheckedUsage & cb->usage &
-            (BufferUsage::CPU_READ_MASK | BufferUsage::CPU_WRITE_MASK);
-        if (checkedUsage == 0) {
-            RETURN_ERROR(Error3::BAD_VALUE);
         }
         if (!cb->bufferSize) {
             RETURN_ERROR(Error3::BAD_BUFFER);
@@ -306,13 +275,11 @@ private:  // **** impl ****
         }
 
         if (cb->hostHandle) {
-            const Error3 e = lockHostImpl(*cb, checkedUsage, accessRegion, bufferBits);
+            const Error3 e = lockHostImpl(*cb, cpuUsage, accessRegion, bufferBits);
             if (e != Error3::NONE) {
                 return e;
             }
         }
-
-        setLocked(cb, checkedUsage, accessRegion);
 
         *pptr = bufferBits;
         *pBytesPerPixel = cb->bytesPerPixel;
@@ -321,7 +288,7 @@ private:  // **** impl ****
     }
 
     Error3 lockYCbCrImpl(void* raw,
-                         const uint64_t uncheckedUsage,
+                         uint64_t cpuUsage,
                          const Rect& accessRegion,
                          const hidl_handle& acquireFence,
                          YCbCrLayout3* pYcbcr) {
@@ -331,14 +298,6 @@ private:  // **** impl ****
         cb_handle_30_t* cb = cb_handle_30_t::from(raw);
         if (!cb) {
             RETURN_ERROR(Error3::BAD_BUFFER);
-        }
-        if (cb->lockedUsage) {
-            RETURN_ERROR(Error3::BAD_VALUE);
-        }
-        const uint8_t checkedUsage = uncheckedUsage & cb->usage &
-            (BufferUsage::CPU_READ_MASK | BufferUsage::CPU_WRITE_MASK);
-        if (checkedUsage == 0) {
-            RETURN_ERROR(Error3::BAD_VALUE);
         }
         if (!cb->bufferSize) {
             RETURN_ERROR(Error3::BAD_BUFFER);
@@ -382,27 +341,17 @@ private:  // **** impl ****
             cStep = 1;
             break;
 
-        case PixelFormat::YCBCR_P010:
-            yStride = cb->width * 2;
-            cStride = yStride;
-            uOffset = cb->height * yStride;
-            vOffset = uOffset + 2;
-            cStep = 4;
-            break;
-
         default:
             ALOGE("%s:%d unexpected format (%d)", __func__, __LINE__, cb->format);
             RETURN_ERROR(Error3::BAD_BUFFER);
         }
 
         if (cb->hostHandle) {
-            const Error3 e = lockHostImpl(*cb, checkedUsage, accessRegion, bufferBits);
+            const Error3 e = lockHostImpl(*cb, cpuUsage, accessRegion, bufferBits);
             if (e != Error3::NONE) {
                 return e;
             }
         }
-
-        setLocked(cb, checkedUsage, accessRegion);
 
         pYcbcr->y = bufferBits;
         pYcbcr->cb = bufferBits + uOffset;
@@ -415,12 +364,16 @@ private:  // **** impl ****
     }
 
     Error3 lockHostImpl(cb_handle_30_t& cb,
-                        const uint8_t checkedUsage,
+                        const uint32_t usage,
                         const Rect& accessRegion,
                         char* const bufferBits) {
+        const bool usageSwRead = usage & BufferUsage::CPU_READ_MASK;
+        const bool usageSwWrite = usage & BufferUsage::CPU_WRITE_MASK;
+        const bool usageHwCamera = usage & (BufferUsage::CAMERA_INPUT | BufferUsage::CAMERA_OUTPUT);
+        const bool usageHwCameraWrite = usage & BufferUsage::CAMERA_OUTPUT;
+
         const HostConnectionSession conn = getHostConnectionSession();
         ExtendedRCEncoderContext *const rcEnc = conn.getRcEncoder();
-        const bool usageSwRead = (checkedUsage & BufferUsage::CPU_READ_MASK) != 0;
 
         const int res = rcEnc->rcColorBufferCacheFlush(
             rcEnc, cb.hostHandle, 0, usageSwRead);
@@ -428,7 +381,9 @@ private:  // **** impl ****
             RETURN_ERROR(Error3::NO_RESOURCES);
         }
 
-        if (usageSwRead) {
+        // camera delivers bits to the buffer directly and does not require
+        // an explicit read.
+        if (usageSwRead && !usageHwCamera) {
             if (gralloc_is_yuv_format(cb.format)) {
                 if (rcEnc->hasYUVCache()) {
                     uint32_t bufferSize;
@@ -479,41 +434,36 @@ private:  // **** impl ****
                     }
                 }
             } else {
-                if (rcEnc->featureInfo()->hasReadColorBufferDma) {
-                    {
-                        AEMU_SCOPED_TRACE("bindDmaDirectly");
-                        rcEnc->bindDmaDirectly(bufferBits,
-                                getMmapedPhysAddr(cb.getMmapedOffset()));
-                    }
-                    rcEnc->rcReadColorBufferDMA(rcEnc,
-                        cb.hostHandle,
-                        0, 0, cb.width, cb.height,
-                        cb.glFormat, cb.glType,
-                        bufferBits, cb.width * cb.height * cb.bytesPerPixel);
-                } else {
-                    rcEnc->rcReadColorBuffer(rcEnc,
-                        cb.hostHandle,
-                        0, 0, cb.width, cb.height,
-                        cb.glFormat, cb.glType,
-                        bufferBits);
-                }
+                rcEnc->rcReadColorBuffer(rcEnc,
+                                         cb.hostHandle,
+                                         0, 0, cb.width, cb.height,
+                                         cb.glFormat, cb.glType,
+                                         bufferBits);
             }
+        }
+
+        if (usageSwWrite || usageHwCameraWrite) {
+            cb.lockedLeft = accessRegion.left;
+            cb.lockedTop = accessRegion.top;
+            cb.lockedWidth = accessRegion.width;
+            cb.lockedHeight = accessRegion.height;
+        } else {
+            cb.lockedLeft = 0;
+            cb.lockedTop = 0;
+            cb.lockedWidth = cb.width;
+            cb.lockedHeight = cb.height;
         }
 
         RETURN(Error3::NONE);
     }
 
     Error3 unlockImpl(void* raw) {
-        AEMU_SCOPED_TRACE("unlockImpl body");
         if (!raw) {
             RETURN_ERROR(Error3::BAD_BUFFER);
         }
         cb_handle_30_t* cb = cb_handle_30_t::from(raw);
         if (!cb) {
             RETURN_ERROR(Error3::BAD_BUFFER);
-        }
-        if (cb->lockedUsage == 0) {
-            RETURN_ERROR(Error3::BAD_VALUE);
         }
         if (!cb->bufferSize) {
             RETURN_ERROR(Error3::BAD_BUFFER);
@@ -527,81 +477,70 @@ private:  // **** impl ****
             unlockHostImpl(*cb, bufferBits);
         }
 
-        cb->lockedLeft = 0;
-        cb->lockedTop = 0;
-        cb->lockedWidth = 0;
-        cb->lockedHeight = 0;
-        cb->lockedUsage = 0;
-
         RETURN(Error3::NONE);
     }
 
     void unlockHostImpl(cb_handle_30_t& cb, char* const bufferBits) {
-        AEMU_SCOPED_TRACE("unlockHostImpl body");
-        if (cb.lockedUsage & BufferUsage::CPU_WRITE_MASK) {
-            const int bpp = glUtilsPixelBitSize(cb.glFormat, cb.glType) >> 3;
-            const uint32_t rgbSize = cb.width * cb.height * bpp;
-            const char* bitsToSend;
-            uint32_t sizeToSend;
+        const int bpp = glUtilsPixelBitSize(cb.glFormat, cb.glType) >> 3;
+        const int left = cb.lockedLeft;
+        const int top = cb.lockedTop;
+        const int width = cb.lockedWidth;
+        const int height = cb.lockedHeight;
+        const uint32_t rgbSize = width * height * bpp;
+        std::vector<char> convertedBuf;
+        const char* bitsToSend;
+        uint32_t sizeToSend;
 
-            if (gralloc_is_yuv_format(cb.format)) {
-                bitsToSend = bufferBits;
-                switch (static_cast<PixelFormat>(cb.format)) {
-                    case PixelFormat::YV12:
-                        get_yv12_offsets(cb.width, cb.height, nullptr, nullptr, &sizeToSend);
-                        break;
-                    case PixelFormat::YCBCR_420_888:
-                        get_yuv420p_offsets(cb.width, cb.height, nullptr, nullptr, &sizeToSend);
-                        break;
-                    default:
-                        CRASH("Unexpected format, switch is out of sync with gralloc_is_yuv_format");
-                        break;
-                }
-            } else {
-                bitsToSend = bufferBits;
-                sizeToSend = rgbSize;
+        if (gralloc_is_yuv_format(cb.format)) {
+            bitsToSend = bufferBits;
+            switch (static_cast<PixelFormat>(cb.format)) {
+            case PixelFormat::YV12:
+                get_yv12_offsets(width, height, nullptr, nullptr, &sizeToSend);
+                break;
+            case PixelFormat::YCBCR_420_888:
+                get_yuv420p_offsets(width, height, nullptr, nullptr, &sizeToSend);
+                break;
+            default:
+                CRASH("Unexpected format, switch is out of sync with gralloc_is_yuv_format");
+                break;
             }
-
-            {
-                const HostConnectionSession conn = getHostConnectionSession();
-                ExtendedRCEncoderContext *const rcEnc = conn.getRcEncoder();
-                {
-                    AEMU_SCOPED_TRACE("bindDmaDirectly");
-                    rcEnc->bindDmaDirectly(bufferBits,
-                            getMmapedPhysAddr(cb.getMmapedOffset()));
-                }
-                {
-                    AEMU_SCOPED_TRACE("updateColorBuffer");
-                    rcEnc->rcUpdateColorBufferDMA(rcEnc, cb.hostHandle,
-                            0, 0, cb.width, cb.height,
-                            cb.glFormat, cb.glType,
-                            const_cast<char*>(bitsToSend),
-                            sizeToSend);
-                }
-            }
+        } else {
+            convertedBuf.resize(rgbSize);
+            copy_rgb_buffer_from_unlocked(
+                convertedBuf.data(), bufferBits,
+                cb.width,
+                width, height, top, left, bpp);
+            bitsToSend = convertedBuf.data();
+            sizeToSend = rgbSize;
         }
-    }
 
-    /* BufferUsage bits that must be zero */
-    static constexpr uint64_t kReservedUsage =
-        (one64 << 10)
-        | (one64 << 13)
-        | (one64 << 19)
-        | (one64 << 21)
-        | ones(25, 27) /* bits 25-27 must be zero and are reserved for future versions */
-        | ones(32, 47); /* bits 32-47 must be zero and are reserved for future versions */
+        {
+            const HostConnectionSession conn = getHostConnectionSession();
+            ExtendedRCEncoderContext *const rcEnc = conn.getRcEncoder();
+            rcEnc->bindDmaDirectly(bufferBits,
+                                   getMmapedPhysAddr(cb.getMmapedOffset()));
+            rcEnc->rcUpdateColorBufferDMA(rcEnc, cb.hostHandle,
+                    left, top, width, height,
+                    cb.glFormat, cb.glType,
+                    const_cast<char*>(bitsToSend), sizeToSend);
+        }
+
+        cb.lockedLeft = 0;
+        cb.lockedTop = 0;
+        cb.lockedWidth = 0;
+        cb.lockedHeight = 0;
+    }
 
     bool isSupportedImpl(const IMapper::BufferDescriptorInfo& descriptor) const {
         if (!descriptor.width) { RETURN(false); }
         if (!descriptor.height) { RETURN(false); }
         if (descriptor.layerCount != 1) { RETURN(false); }
 
-        const uint64_t usage64 = descriptor.usage;
-        if (usage64 & kReservedUsage) {
-            RETURN(false);
-        }
-
-        const uint32_t usage = usage64;
+        const uint32_t usage = descriptor.usage;
+        const bool usageSwWrite = usage & BufferUsage::CPU_WRITE_MASK;
+        const bool usageSwRead = usage & BufferUsage::CPU_READ_MASK;
+        const bool usageHwCamWrite = usage & BufferUsage::CAMERA_OUTPUT;
+        const bool usageHwCamRead = usage & BufferUsage::CAMERA_INPUT;
 
         switch (descriptor.format) {
         case PixelFormat::RGBA_8888:
@@ -610,24 +549,38 @@ private:  // **** impl ****
         case PixelFormat::RGB_565:
         case PixelFormat::RGBA_FP16:
         case PixelFormat::RGBA_1010102:
+        case PixelFormat::YCRCB_420_SP:
         case PixelFormat::YV12:
         case PixelFormat::YCBCR_420_888:
-        case PixelFormat::YCBCR_P010:
             RETURN(true);
 
         case PixelFormat::IMPLEMENTATION_DEFINED:
+            if (usage & BufferUsage::CAMERA_OUTPUT) {
+                if (usage & BufferUsage::GPU_TEXTURE) {
+                    RETURN(true);
+                } else if (usage & BufferUsage::VIDEO_ENCODER) {
+                    RETURN(true);
+                }
+            }
             RETURN(false);
 
         case PixelFormat::RGB_888:
-        case PixelFormat::YCRCB_420_SP:
+            RETURN(0 == (usage & (BufferUsage::GPU_TEXTURE |
+                                  BufferUsage::GPU_RENDER_TARGET |
+                                  BufferUsage::COMPOSER_OVERLAY |
+                                  BufferUsage::COMPOSER_CLIENT_TARGET)));
+
         case PixelFormat::RAW16:
         case PixelFormat::Y16:
+            RETURN((usageSwRead || usageHwCamRead) &&
+                   (usageSwWrite || usageHwCamWrite));
+
         case PixelFormat::BLOB:
-            RETURN(!needGpuBuffer(usage));
+            RETURN(usageSwRead);
 
         default:
             if (static_cast<int>(descriptor.format) == kOMX_COLOR_FormatYUV420Planar) {
-                return (usage & BufferUsage::VIDEO_DECODER) != 0;
+                return (usage & BufferUsage::GPU_DATA_BUFFER) != 0;
             }
 
             RETURN(false);
